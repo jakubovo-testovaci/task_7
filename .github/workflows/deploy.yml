@@ -1,0 +1,124 @@
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  AWS_REGION: eu-central-1
+  TF_VERSION: 1.5.0
+
+jobs:
+  build-and-deploy:
+    name: 'Build and deploy'
+    runs-on: ubuntu-latest
+    
+    # Nastavení permissions pro OIDC
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Generate image tag
+      run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+    
+    - name: Terraform Format Check
+      id: fmt
+      run: terraform fmt -check
+      working-directory: ./terraform
+      continue-on-error: true
+    
+    - name: Terraform Init
+      id: init
+      working-directory: ./terraform
+      run: terraform init
+    
+    - name: Terraform Validate
+      id: validate
+      working-directory: ./terraform
+      run: terraform validate -no-color
+    
+    - name: Terraform Plan
+      id: plan
+      working-directory: ./terraform
+      if: github.event_name == 'pull_request'
+      run: terraform plan -no-color -input=false
+      continue-on-error: true
+    
+    - name: Terraform Plan Status
+      if: steps.plan.outcome == 'failure'
+      run: exit 1
+    
+    - name: Terraform Apply
+      if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+      env:
+          TF_VAR_image_version: ${{ env.IMAGE_TAG }}
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+      working-directory: ./terraform
+      run: terraform apply -auto-approve -input=false
+
+    ## Build and push image #########
+    - name: Get ECR repository URL
+      id: ECR_URL
+      working-directory: ./terraform
+      run: |
+        ECR_URL=$(terraform output -raw ecr_repo_url)
+        echo "ECR_URL=$ECR_URL" >> $GITHUB_OUTPUT
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2    
+
+    - name: Build and push Docker image to ECR
+      env:
+        ECR_URL: ${{ steps.ECR_URL.outputs.ECR_URL }}
+      run: |
+        docker build --pull -t $ECR_URL:$IMAGE_TAG .
+
+        echo "🚀 Pushing images to ECR..."
+        docker push $ECR_URL:$IMAGE_TAG
+
+        echo "✅ Images pushed successfully!"
+        echo "Repository URL: $ECR_URL"
+    #################################
+    
+    - name: Get Load Balancer URL
+      if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+      id: lb_url
+      working-directory: ./terraform
+      run: |
+        LB_URL=$(terraform output -raw load_balancer_url)
+        echo "url=$LB_URL" >> $GITHUB_OUTPUT
+        echo "Load Balancer URL: $LB_URL"
+    
+    - name: Test Application
+      if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+      run: |
+        echo "Waiting for ECS service to be stable..."
+        sleep 60
+        
+        echo "Testing application availability..."
+        for i in {1..10}; do
+          if curl -f "${{ steps.lb_url.outputs.url }}"; then
+            echo "Application is responding!"
+            break
+          else
+            echo "Attempt $i failed, retrying in 30 seconds..."
+            sleep 30
+          fi
+        done
