@@ -16,8 +16,8 @@ Tento projekt nasazuje nginx aplikaci na AWS ECS pomocí Terraform a GitHub Acti
    - `AWS_SECRET_ACCESS_KEY`
 3. Vytvořte S3 bucket pro Terraform state
 4. Upravte backend konfiguraci v `state.tf`
-5. Nastavte AWS region v pipeline env AWS_REGION
-6. Push do main branch spustí nasazení
+5. Nastavte AWS region kromě v `state.tf` i v pipeline env AWS_REGION
+6. Push do master branch spustí nasazení
 
 ### Použití
 Po úspěšném nasazení bude aplikace dostupná na URL z GitHub Actions výstupu.
